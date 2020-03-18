@@ -1,0 +1,7 @@
+Sessing.vim
+__pycache__/
+bak/
+data/
+result/
+.*
+!.gitignore
