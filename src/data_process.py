@@ -2,7 +2,7 @@
 #-*- coding: utf-8 -*-
 # **********************************************************************
 # * Description   : data preprocess for exp1
-# * Last change   : 00:16:00 2020-03-20
+# * Last change   : 00:34:25 2020-03-20
 # * Author        : Yihao Chen
 # * Email         : chenyiha17@mails.tsinghua.edu.cn
 # * License       : www.opensource.org/licenses/bsd-license.php
@@ -56,7 +56,7 @@ def main(dataset, num_workers, reprocess, **kwargs):
 
 def executor(input_path, output_dir):
     with open(input_path, "r") as f:
-        paras = re.split(r"\n\n", f.read())
+        paras = re.split(r"\n\n", f.read()) # get paragraphs
 
     # save meta data
     meta_file = output_dir / f"{input_path.parent.stem}{input_path.stem}.meta"
@@ -88,8 +88,7 @@ def meta_parse(line):
 
 
 def text_clean(line):
-    r = re.compile(r"^[^\w]+|[^\w]+$")
-    return " ".join([r.sub("", i) for i in line.split()])
+    return " ".join([i.strip() for i in re.split(r"[^\w]+", line) if i])
 
 
 if __name__ == "__main__":
