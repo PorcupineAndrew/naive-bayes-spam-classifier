@@ -2,7 +2,7 @@
 #-*- coding: utf-8 -*-
 # **********************************************************************
 # * Description   : data preprocess for exp1
-# * Last change   : 23:59:01 2020-03-25
+# * Last change   : 09:30:21 2020-03-27
 # * Author        : Yihao Chen
 # * Email         : chenyiha17@mails.tsinghua.edu.cn
 # * License       : www.opensource.org/licenses/bsd-license.php
@@ -91,10 +91,11 @@ def createDir(path, remove=False):
 
 def meta_parse(line):
     lines = re.sub(r"\n\s+", " ", line).split("\n") # merge multi-lines meta data
-    meta_data = [re.match(r"^(.*):(.*)$", i.strip()) for i in lines]
+    meta_data = [re.match(r"^(.*?): (.*)$", i.strip()) for i in lines]
     meta_data = [i.groups() for i in meta_data if i]
     ret = {}
     for k, v in meta_data:
+        if len(k) > 32: continue
         if k in ret: ret[k].append(v)
         else: ret[k] = [v]
     return ret

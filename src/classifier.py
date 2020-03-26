@@ -2,7 +2,7 @@
 #-*- coding: utf-8 -*-
 # **********************************************************************
 # * Description   : spam classify evaluation for exp1
-# * Last change   : 22:42:37 2020-03-26
+# * Last change   : 10:42:44 2020-03-27
 # * Author        : Yihao Chen
 # * Email         : chenyiha17@mails.tsinghua.edu.cn
 # * License       : www.opensource.org/licenses/bsd-license.php
@@ -14,6 +14,7 @@ from loguru._defaults import LOGURU_FORMAT
 from joblib import Parallel, delayed
 from itertools import product
 from pathlib import Path
+from tqdm import tqdm
 import os.path as ospath
 import pandas as pd
 import numpy as np
@@ -46,6 +47,7 @@ def main(dataset, output_dir, **kwargs):
 
 
 def n_fold_cross_validation(input_dir, output_dir, n_fold=5, n_workers=1, **kwargs):
+    kwargs.update({"tqdm_disable": n_workers>1})
     logger.info(f"{n_fold} fold cross validation, train ratio {kwargs['train_ratio']}, random seed {kwargs['random_seed']}")
     df_label = shuffle(pd.read_csv(input_dir / "label.csv", dtype=str), random_state=kwargs["random_seed"])
     df_label.label = df_label.label.astype(int)
@@ -61,12 +63,13 @@ def n_fold_cross_validation(input_dir, output_dir, n_fold=5, n_workers=1, **kwar
         list_use_meta = [True, False]
         list_model = [f"naive_bayes_{i}" for i in range(5)]
         tasks = product(train_masks, list_train_ratio, list_model, list_use_meta)
-        results = Parallel(**options)(delayed(train_and_evaluate)(df_label, input_dir, *opt) for opt in tasks)
+        for i in ["train_ratio", "use_meta", "model"]: kwargs.pop(i)
+        results = Parallel(**options)(delayed(train_and_evaluate)(df_label, input_dir, *opt, **kwargs) for opt in shuffle(list(tasks)))
     else:
         results = Parallel(**options)(delayed(train_and_evaluate)(df_label, input_dir, m, **kwargs) for m in train_masks)
 
     df_result = pd.DataFrame.from_records(results)
-    df_result.to_csv(output_dir / "result_{time.strftime('%x').replace('/', '_')}.csv", index=False)
+    df_result.to_csv(output_dir / f"result_{time.strftime('%x').replace('/', '_')}.csv", index=False)
 
     logger.info("\n"+ str(df_result))
     logger.info(f"mean measure:\n {df_result.mean()}")
@@ -98,8 +101,8 @@ def train_and_evaluate(df_label, input_dir, train_mask, train_ratio, model, use_
     prob_n = 1 - prob_p
     logger.debug(f"P(p): {prob_p:.4f}")
 
-    prob_p_meta, prob_n_meta = get_meta_prob(df_label_train, input_dir)[model]
-    prob_p_text, prob_n_text = get_text_prob(df_label_train, input_dir)[model]
+    prob_p_meta, prob_n_meta = get_meta_prob(df_label_train, input_dir, **kwargs)[model]
+    prob_p_text, prob_n_text = get_text_prob(df_label_train, input_dir, **kwargs)[model]
 
     logger.debug(f"finish training")
     t1 = time.time()
@@ -116,21 +119,24 @@ def train_and_evaluate(df_label, input_dir, train_mask, train_ratio, model, use_
         if use_meta:
             with open(input_dir / f"{filename}.meta", "r") as f:
                 meta_obj = json.load(f)
-            metas = meta_obj.keys(), meta_obj.values()
+            metas = meta_obj.keys(), map(lambda x: len(x), meta_obj.values())
             # _prob_p *= np.prod(list(map(prob_p_meta, *metas)))
             # _prob_n *= np.prod(list(map(prob_n_meta, *metas)))
             _prob_p += np.sum(list(map(prob_p_meta, *metas)))
             _prob_n += np.sum(list(map(prob_n_meta, *metas)))
         return int(_prob_p > _prob_n)
 
-    predicts = np.array(list(map(predict, df_label_test.file)))
-    labels = df_label_test.label.values
+    files = tqdm(df_label_test.file, disable=kwargs["tqdm_disable"])
+    files.set_description("Testing")
+    predicts = np.array(list(map(predict, files))).astype(bool)
+    labels = df_label_test.label.values.astype(bool)
 
     tp = sum(predicts & labels)
     fp = sum(predicts & ~labels)
     fn = sum(~predicts & labels)
     tn = sum(~predicts & ~labels)
-    assert tp + fp + fn + tn == len(predicts)
+    assert tp + fp + fn + tn == len(predicts), f'{tp} + {fp} + {fn} + {tn} != {len(predicts)}'
+    logger.debug(f'{tp}, {fp}, {fn}, {tn}')
 
     t2 = time.time()
 
@@ -140,100 +146,89 @@ def train_and_evaluate(df_label, input_dir, train_mask, train_ratio, model, use_
     result["train_ratio"] = train_ratio
     result["use_meta"] = use_meta
 
-    result["accuracy"] = (tp + tn) / (tp + fp + fn + tn)
-    result["precision"] = tp / (tp + fp)
-    result["recall"] = tp / (tp + fn)
-    result["specificity"] = tn / (tn + fp)
-    result["prevalence"] = (tp + fn) / (tp + fp + fn + tn)
-    result["f1-score"] = 2 * result["precision"] * result["recall"] / (result["precision"] + result["recall"])
-    result["train_time"] = t1 - st_time
-    result["test_time"] = t2 - t1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result["accuracy"] = (tp + tn) / (tp + fp + fn + tn)
+        result["precision"] = tp / (tp + fp)
+        result["recall"] = tp / (tp + fn)
+        result["specificity"] = tn / (tn + fp)
+        result["prevalence"] = (tp + fn) / (tp + fp + fn + tn)
+        result["f1-score"] = 2 * result["precision"] * result["recall"] / (result["precision"] + result["recall"])
+        result["train_time"] = t1 - t0
+        result["test_time"] = t2 - t1
 
     for k,v in result.items():
-        logger.debug(f"{k:15s}: {v:.4f}")
+        logger.debug(f"{k:15s}: {v}")
     return result
 
 
-def get_prob_bayes(_df, _k, _l, _r, _clip=1, alpha=1, M=2, post=np.log): # NOTE parameters
-    if _k not in _df.columns:
-        ret = post(alpha / (_df.shape[0]-1 + M*alpha))
-    else:
-        if _df[_k].iloc[-1] == 0:
-            ret = post((_df[_k].iloc[:-1].values[np.logical_and(
-                _df[_k].iloc[:-1] >= _l,
-                _df[_k].iloc[:-1] < _r
-            )].clip(max=_clip).sum() + alpha) / (_df.shape[0]-1 + M*alpha))
-            _df[_k].iloc[-1] = ret
-        else:
-            ret = _df[_k].iloc[-1]
-    return ret
+def get_prob_bayes(_data, _k, _l, _r, _clip=1, alpha=1, M=2, post=np.log): # NOTE parameters
+    density = 0
+    if _k in _data:
+        counts, freq = np.array(list(_data[_k].items())).T
+        valid = (counts >= _l) & (counts < _r)
+        density = (freq[valid] * counts[valid].clip(max=_clip)).sum()
+    return post((density + alpha) / (_data["__total__"] + M*alpha))
 
 
-def prob_wrapper(df_p, df_n):
+def prob_wrapper(data_p, data_n):
     return {
         "naive_bayes_0": ( # probability based on "exsistence"
-            lambda x, _: get_prob_bayes(df_p, x, _l=1, _r=float("inf"), _clip=1),
-            lambda x, _: get_prob_bayes(df_n, x, _l=1, _r=float("inf"), _clip=1)
+            lambda x, _: get_prob_bayes(data_p, x, _l=1, _r=float("inf"), _clip=1),
+            lambda x, _: get_prob_bayes(data_n, x, _l=1, _r=float("inf"), _clip=1)
         ),
         "naive_bayes_1": ( # probability based on "exsistence on each time"
-            lambda k, v: get_prob_bayes(df_p, x, _l=1, _r=float("inf"), _clip=1) ** v,
-            lambda k, v: get_prob_bayes(df_n, x, _l=1, _r=float("inf"), _clip=1) ** v
+            lambda k, v: get_prob_bayes(data_p, k, _l=1, _r=float("inf"), _clip=1) * v,
+            lambda k, v: get_prob_bayes(data_n, k, _l=1, _r=float("inf"), _clip=1) * v
         ),
         "naive_bayes_2": ( # probability based on "greater or equal than"
-            lambda k, v: get_prob_bayes(df_p, k, _l=v, _r=float("inf"), _clip=1),
-            lambda k, v: get_prob_bayes(df_n, k, _l=v, _r=float("inf"), _clip=1)
+            lambda k, v: get_prob_bayes(data_p, k, _l=v, _r=float("inf"), _clip=1),
+            lambda k, v: get_prob_bayes(data_n, k, _l=v, _r=float("inf"), _clip=1)
         ),
         "naive_bayes_3": ( # probability based on "accurate value"
-            lambda k, v: get_prob_bayes(df_p, k, _v=v, _r=v, _clip=1),
-            lambda k, v: get_prob_bayes(df_n, k, _v=v, _r=v, _clip=1)
+            lambda k, v: get_prob_bayes(data_p, k, _l=v, _r=v, _clip=1),
+            lambda k, v: get_prob_bayes(data_n, k, _l=v, _r=v, _clip=1)
         ),
         "naive_bayes_4": ( # weight based on "exsistence"
-            lambda x, _: get_prob_bayes(df_p, x, _l=1, _r=float("inf"), _clip=float("inf")),
-            lambda x, _: get_prob_bayes(df_n, x, _l=1, _r=float("inf"), _clip=float("inf"))
+            lambda x, _: get_prob_bayes(data_p, x, _l=1, _r=float("inf"), _clip=float("inf")),
+            lambda x, _: get_prob_bayes(data_n, x, _l=1, _r=float("inf"), _clip=float("inf"))
         ),
     }
 
 
-def get_meta_prob(df_label_train, input_dir):
-    records = []
-    for filename in df_label_train.file:
+def update(record, k, v):
+    record["__total__"] += 1
+    if k in record:
+        if v in record[k]: record[k][v] += 1
+        else: record[k][v] = 1
+    else: record[k] = dict([(v, 1)])
+
+
+def get_meta_prob(df_label_train, input_dir, **kwargs):
+    p_records, n_records = dict(__total__=0), dict(__total__=0)
+
+    files = tqdm(np.array(df_label_train), disable=kwargs["tqdm_disable"])
+    for filename, label in files:
+        files.set_description(f"Loading {filename}.meta")
         with open(input_dir / f"{filename}.meta", "r") as f:
             meta_obj = json.load(f)
-        records.append(dict(map(lambda x: (x[0], len(x[1])), meta_obj.items())))
+        list(map(lambda k, v: update(p_records if label == 1 else n_records, k, v),
+            meta_obj.keys(), map(len, meta_obj.values())))
 
-    df_meta = pd.DataFrame.from_records(records)
-    df_meta_p = df_meta.loc[df_label_train.label.values == 1]
-    df_meta_n = df_meta.loc[df_label_train.label.values == 0]
-    
-    logger.debug(f"train meta data: {len(df_meta.columns)}")
-
-    # append one row as probability (only calculated when needed)
-    zero_record = dict(zip(df_meta.columns, np.zeros(df_meta.shape[1])))
-    df_meta_p = df_meta_p.append(zero_record, ignore_index=True).fillna(0)
-    df_meta_n = df_meta_n.append(zero_record, ignore_index=True).fillna(0)
-
-    return prob_wrapper(df_meta_p, df_meta_n)
+    return prob_wrapper(p_records, n_records)
 
 
-def get_text_prob(df_label_train, input_dir):
-    records = []
-    for filename in df_label_train.file:
+def get_text_prob(df_label_train, input_dir, **kwargs):
+    p_records, n_records = dict(__total__=0), dict(__total__=0)
+
+    files = tqdm(np.array(df_label_train), disable=kwargs["tqdm_disable"])
+    for filename, label in files:
+        files.set_description(f"Loading {filename}.txt")
         with open(input_dir / f"{filename}.txt", "r") as f:
             words = np.array([f.read().split()])
-        records.append(dict(zip(*np.unique(words, return_counts=True))))
+        list(map(lambda k, v: update(p_records if label == 1 else n_records, k, v),
+            *np.unique(words, return_counts=True)))
 
-    df_model = pd.DataFrame.from_records(records)
-    df_model_p = df_model.loc[df_label_train.label.values == 1]
-    df_model_n = df_model.loc[df_label_train.label.values == 0]
-
-    logger.debug(f"train words: {len(df_model.columns)}")
-
-    # append one row as probability (only calculated when needed)
-    zero_record = dict(zip(df_model.columns, np.zeros(df_model.shape[1])))
-    df_model_p = df_model_p.append(zero_record, ignore_index=True).fillna(0)
-    df_model_n = df_model_n.append(zero_record, ignore_index=True).fillna(0)
-
-    return prob_wrapper(df_model_p, df_model_n)
+    return prob_wrapper(p_records, n_records)
 
 
 if __name__ == "__main__":
