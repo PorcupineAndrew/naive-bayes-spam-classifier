@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # **********************************************************************
 # * Description   : run experiment script for Exp1
-# * Last change   : 22:58:53 2020-03-25
+# * Last change   : 21:02:48 2020-03-26
 # * Author        : Yihao Chen
 # * Email         : chenyiha17@mails.tsinghua.edu.cn
 # * License       : www.opensource.org/licenses/bsd-license.php
@@ -43,7 +43,7 @@ run_classifier()
     FLAGS=$@
 
     [ ! -d "${RESULT_DIR}/${DATASET}" ] && mkdir "${RESULT_DIR}/${DATASET}"
-    ./run_classifier.py \
+    ./classifier.py \
         --dataset "$DATASET" \
         --n-workers "$NUM_WORKER" \
         --train-ratio "$TRAIN_RATIO" \
@@ -67,7 +67,7 @@ case "$TASK" in
         run_classifier "$DATASET" "$NUM_WORKER" $@
         ;;
     all)
-        run_classifier "$DATASET" "$NUM_WORKER" "_" "_" "_" "--all-test"
+        run_classifier "$DATASET" "$NUM_WORKER" "1.0" "_" "true" "--all-test"
         ;;
     preprocess)
         run_data_process "$DATASET" "$NUM_WORKER" $@

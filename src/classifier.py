@@ -2,7 +2,7 @@
 #-*- coding: utf-8 -*-
 # **********************************************************************
 # * Description   : spam classify evaluation for exp1
-# * Last change   : 20:47:53 2020-03-24
+# * Last change   : 22:42:37 2020-03-26
 # * Author        : Yihao Chen
 # * Email         : chenyiha17@mails.tsinghua.edu.cn
 # * License       : www.opensource.org/licenses/bsd-license.php
@@ -13,9 +13,11 @@ from loguru import logger
 from loguru._defaults import LOGURU_FORMAT
 from joblib import Parallel, delayed
 from itertools import product
+from pathlib import Path
 import os.path as ospath
 import pandas as pd
 import numpy as np
+import click
 import sys
 import time
 import json
@@ -50,7 +52,7 @@ def n_fold_cross_validation(input_dir, output_dir, n_fold=5, n_workers=1, **kwar
     n_data = df_label.shape[0]
     train_masks = [(i*n_data//n_fold, (i+1)*n_data//n_fold) for i in range(n_fold)]
     options = {
-        "n_job": n_workers,
+        "n_jobs": n_workers,
         "backend": "multiprocessing",
         "verbose": 100,
     }
@@ -85,7 +87,7 @@ def train_and_evaluate(df_label, input_dir, train_mask, train_ratio, model, use_
     mask = np.ones(n_data).astype(bool)
     mask[start:end] = False
     df_label_train = df_label[mask]
-    df_label_train = df_label_train[:df_label_train.shape[0]*train_ratio]
+    df_label_train = df_label_train[:int(df_label_train.shape[0]*train_ratio)]
     df_label_test = df_label[~mask]
     
     logger.debug(f"train: {df_label_train.shape[0]}, {np.sum(df_label_train.label)} of spam")
@@ -93,34 +95,42 @@ def train_and_evaluate(df_label, input_dir, train_mask, train_ratio, model, use_
 
     # train ------------------------------
     prob_p = df_label_train.label.values.sum() / df_label_train.shape[0]
+    prob_n = 1 - prob_p
     logger.debug(f"P(p): {prob_p:.4f}")
 
     prob_p_meta, prob_n_meta = get_meta_prob(df_label_train, input_dir)[model]
     prob_p_text, prob_n_text = get_text_prob(df_label_train, input_dir)[model]
 
+    logger.debug(f"finish training")
     t1 = time.time()
 
     # test -------------------------------
     def predict(filename):
         with open(input_dir / f"{filename}.txt", "r") as f:
-            words = zip(*np.unique(f.read().split(), return_counts=True))
-        _prob_p = np.prod(list(map(prob_p_text, words))) * prob_p
-        _prob_n = np.prod(list(map(prob_n_text, words))) * (1-prob_p)
+            words = np.unique(f.read().split(), return_counts=True)
+        # NOTE: to avoid overflow
+        # _prob_p = np.prod(list(map(prob_p_text, *words))) * prob_p
+        # _prob_n = np.prod(list(map(prob_n_text, *words))) * (1-prob_p)
+        _prob_p = np.log(prob_p) + np.sum(list(map(prob_p_text, *words)))
+        _prob_n = np.log(prob_n) + np.sum(list(map(prob_n_text, *words)))
         if use_meta:
             with open(input_dir / f"{filename}.meta", "r") as f:
-                metas = [(k, len(v)) for k, v in json.load(f).items()]
-            _prob_p *= np.prod(list(map(prob_p_meta, metas)))
-            _prob_n *= np.prod(list(map(prob_n_meta, metas)))
+                meta_obj = json.load(f)
+            metas = meta_obj.keys(), meta_obj.values()
+            # _prob_p *= np.prod(list(map(prob_p_meta, *metas)))
+            # _prob_n *= np.prod(list(map(prob_n_meta, *metas)))
+            _prob_p += np.sum(list(map(prob_p_meta, *metas)))
+            _prob_n += np.sum(list(map(prob_n_meta, *metas)))
         return int(_prob_p > _prob_n)
 
     predicts = np.array(list(map(predict, df_label_test.file)))
     labels = df_label_test.label.values
 
-    tp = sum(predict & labels)
-    fp = sum(predict & ~labels)
-    fn = sum(~predict & labels)
-    tn = sum(~predict & ~labels)
-    assert tp + fp + fn + tn == len(predict)
+    tp = sum(predicts & labels)
+    fp = sum(predicts & ~labels)
+    fn = sum(~predicts & labels)
+    tn = sum(~predicts & ~labels)
+    assert tp + fp + fn + tn == len(predicts)
 
     t2 = time.time()
 
@@ -144,15 +154,15 @@ def train_and_evaluate(df_label, input_dir, train_mask, train_ratio, model, use_
     return result
 
 
-def get_prob_bayes(_df, _k, _l, _r, _clip=1, alpha=1, M=2): # NOTE parameters
+def get_prob_bayes(_df, _k, _l, _r, _clip=1, alpha=1, M=2, post=np.log): # NOTE parameters
     if _k not in _df.columns:
-        ret = alpha / (_df.shape[0] - 1 + M*alpha)
+        ret = post(alpha / (_df.shape[0]-1 + M*alpha))
     else:
         if _df[_k].iloc[-1] == 0:
-            ret = _df[_k].iloc[-1].values[np.logical_and(
-                _df[_k].iloc[-1] >= _l,
-                _df[_k].iloc[-1] < _r
-            )].clip(max=_clip).sum()
+            ret = post((_df[_k].iloc[:-1].values[np.logical_and(
+                _df[_k].iloc[:-1] >= _l,
+                _df[_k].iloc[:-1] < _r
+            )].clip(max=_clip).sum() + alpha) / (_df.shape[0]-1 + M*alpha))
             _df[_k].iloc[-1] = ret
         else:
             ret = _df[_k].iloc[-1]
@@ -189,18 +199,18 @@ def get_meta_prob(df_label_train, input_dir):
     for filename in df_label_train.file:
         with open(input_dir / f"{filename}.meta", "r") as f:
             meta_obj = json.load(f)
-        records.append(dict(map(lambda x: (x[0], len[x[1]]), meta_obj)))
+        records.append(dict(map(lambda x: (x[0], len(x[1])), meta_obj.items())))
 
     df_meta = pd.DataFrame.from_records(records)
-    df_meta_p = df_model.loc[df_label_train.label == 1]
-    df_meta_n = df_model.loc[df_label_train.label == 0]
+    df_meta_p = df_meta.loc[df_label_train.label.values == 1]
+    df_meta_n = df_meta.loc[df_label_train.label.values == 0]
     
     logger.debug(f"train meta data: {len(df_meta.columns)}")
 
     # append one row as probability (only calculated when needed)
     zero_record = dict(zip(df_meta.columns, np.zeros(df_meta.shape[1])))
-    df_meta_p = df_meta_p.append(zero_record).fillna(0)
-    df_meta_n = df_meta_n.append(zero_record).fillna(0)
+    df_meta_p = df_meta_p.append(zero_record, ignore_index=True).fillna(0)
+    df_meta_n = df_meta_n.append(zero_record, ignore_index=True).fillna(0)
 
     return prob_wrapper(df_meta_p, df_meta_n)
 
@@ -213,18 +223,18 @@ def get_text_prob(df_label_train, input_dir):
         records.append(dict(zip(*np.unique(words, return_counts=True))))
 
     df_model = pd.DataFrame.from_records(records)
-    df_model_p = df_model.loc[df_label_train.label == 1]
-    df_model_n = df_model.loc[df_label_train.label == 0]
+    df_model_p = df_model.loc[df_label_train.label.values == 1]
+    df_model_n = df_model.loc[df_label_train.label.values == 0]
 
     logger.debug(f"train words: {len(df_model.columns)}")
 
     # append one row as probability (only calculated when needed)
     zero_record = dict(zip(df_model.columns, np.zeros(df_model.shape[1])))
-    df_model_p = df_model_p.append(zero_record).fillna(0)
-    df_model_n = df_model_n.append(zero_record).fillna(0)
+    df_model_p = df_model_p.append(zero_record, ignore_index=True).fillna(0)
+    df_model_n = df_model_n.append(zero_record, ignore_index=True).fillna(0)
 
     return prob_wrapper(df_model_p, df_model_n)
 
 
-if __name__ == "main":
+if __name__ == "__main__":
     main()
