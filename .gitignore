@@ -2,6 +2,5 @@ Session.vim
 __pycache__/
 bak/
 data/
-result/
 .*
 !.gitignore
