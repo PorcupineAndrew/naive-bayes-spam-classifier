@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # **********************************************************************
 # * Description   : run experiment script for Exp1
-# * Last change   : 21:02:48 2020-03-26
+# * Last change   : 11:29:51 2020-03-29
 # * Author        : Yihao Chen
 # * Email         : chenyiha17@mails.tsinghua.edu.cn
 # * License       : www.opensource.org/licenses/bsd-license.php
@@ -71,6 +71,9 @@ case "$TASK" in
         ;;
     preprocess)
         run_data_process "$DATASET" "$NUM_WORKER" $@
+        ;;
+    check)
+        run_classifier "trec06p" "1" "1.0" "naive_bayes_1" "true"
         ;;
     *)
         help_info
