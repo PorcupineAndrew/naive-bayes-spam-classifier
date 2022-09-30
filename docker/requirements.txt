@@ -1,6 +1,6 @@
 Click==7.0
 tqdm==4.43.0
-joblib==0.13.2
+joblib==1.2.0
 loguru==0.3.2
 numpy==1.17.0
 pandas==0.23.4
